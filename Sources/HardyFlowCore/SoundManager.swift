@@ -39,6 +39,12 @@ public final class SoundManager: @unchecked Sendable {
         playSystemSound(named: "Basso")
     }
     
+    /// Plays an auditory cue indicating a paste operation has completed.
+    public func playPasteCue() {
+        guard isSoundEnabled else { return }
+        playSystemSound(named: "Blow")
+    }
+    
     private func playSystemSound(named name: String) {
         DispatchQueue.main.async {
             if let sound = NSSound(named: NSSound.Name(name)) {

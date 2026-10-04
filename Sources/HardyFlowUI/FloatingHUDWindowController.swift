@@ -36,7 +36,7 @@ public final class FloatingHUDWindowController: NSWindowController, NSWindowDele
     
     private func setupPanel() {
         let panel = HUDPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
             styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
@@ -50,7 +50,7 @@ public final class FloatingHUDWindowController: NSWindowController, NSWindowDele
         panel.isMovableByWindowBackground = true
         panel.isMovable = true
         panel.ignoresMouseEvents = false
-        panel.minSize = NSSize(width: 420, height: 180)
+        panel.minSize = NSSize(width: 420, height: 220)
         panel.maxSize = NSSize(width: 850, height: 600)
         panel.delegate = self
         
@@ -93,7 +93,9 @@ public final class FloatingHUDWindowController: NSWindowController, NSWindowDele
                     // Dismiss immediately during paste so target app regains key window focus instantly
                     self.hideHUD(immediate: true)
                 case .idle, .listeningWakeWord:
-                    self.hideHUD()
+                    if !AppState.shared.isListeningPaused {
+                        self.hideHUD()
+                    }
                 }
             }
             .store(in: &cancellables)

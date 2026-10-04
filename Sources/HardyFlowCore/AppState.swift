@@ -55,12 +55,41 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     @Published public var isChipHovered: Bool = false
     @Published public var isWarningDismissed: Bool = false
     
+    // AI Enhancement & Polish State
+    @Published public var isListeningPaused: Bool = false
+    @Published public var selectedAITag: PolishTag = .noTag
+    @Published public var isPolishing: Bool = false
+    @Published public var prePolishText: String? = nil
+    @Published public var isAIAvailable: Bool = false
+    @Published public var aiErrorMessage: String? = nil
+    public private(set) var aiConfiguration: AIConfiguration?
+    
     // Recent transcripts history for quick reference
     @Published public var recentTranscriptions: [String] = []
+    
+    // Per-App Context Intelligence (Phase 2)
+    @Published public var isAppAwareContextEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isAppAwareContextEnabled, forKey: "HardyFlow_AppAwareContextEnabled")
+        }
+    }
+    @Published public var detectedAppContextTitle: String? = nil
+    
+    // Whisper Mode (Phase 4): Digital pre-gain boost for soft whispering
+    @Published public var isWhisperModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isWhisperModeEnabled, forKey: "HardyFlow_WhisperModeEnabled")
+            AudioEngineManager.shared.isWhisperModeEnabled = isWhisperModeEnabled
+        }
+    }
     
     private var silenceTimer: Timer?
     private let silenceThreshold: Float = 0.05
     private var isTriggeredByWakeWord: Bool = false
+    private var baseCommittedText: String = ""
+    /// Guards against the custom TextEditor binding triggering handleUserManualTextEdit
+    /// when speech recognition programmatically sets transcribedText.
+    public var isProgrammaticTextUpdate: Bool = false
     
     private init() {
         // Restore user defaults with backwards compatibility
@@ -88,7 +117,15 @@ public final class AppState: ObservableObject, @unchecked Sendable {
             ?? UserDefaults.standard.double(forKey: "Wisperflow_SilenceTimeout")
         self.silenceTimeout = savedTimeout > 0 ? savedTimeout : 1.8
         
+        let savedAppAware = UserDefaults.standard.object(forKey: "HardyFlow_AppAwareContextEnabled") as? Bool ?? true
+        self.isAppAwareContextEnabled = savedAppAware
+        
+        let savedWhisper = UserDefaults.standard.bool(forKey: "HardyFlow_WhisperModeEnabled")
+        self.isWhisperModeEnabled = savedWhisper
+        AudioEngineManager.shared.isWhisperModeEnabled = savedWhisper
+        
         setupSubsystems()
+        reloadAIConfiguration()
         refreshPermissions()
         startPermissionMonitoring()
         setupActivationObservers()
@@ -105,7 +142,7 @@ public final class AppState: ObservableObject, @unchecked Sendable {
         // Route audio buffers
         AudioEngineManager.shared.onAudioBuffer = { [weak self] buffer in
             guard let self = self else { return }
-            if self.status == .recording {
+            if self.status == .recording && !self.isListeningPaused {
                 SpeechRecognitionService.shared.appendAudioBuffer(buffer)
             } else if self.status == .listeningWakeWord {
                 WakeWordDetector.shared.appendAudioBuffer(buffer)
@@ -113,13 +150,25 @@ public final class AppState: ObservableObject, @unchecked Sendable {
         }
         
         // Bind speech updates
-        SpeechRecognitionService.shared.onTranscriptionUpdate = { [weak self] text, didRemove in
-            guard let self = self else { return }
-            self.transcribedText = text
+        SpeechRecognitionService.shared.onTranscriptionUpdate = { [weak self] liveSegment, didRemove in
+            guard let self = self, !self.isListeningPaused else { return }
+            
+            let combined: String
+            if self.baseCommittedText.isEmpty {
+                combined = liveSegment
+            } else if liveSegment.isEmpty {
+                combined = self.baseCommittedText
+            } else {
+                combined = "\(self.baseCommittedText) \(liveSegment)"
+            }
+            
+            self.isProgrammaticTextUpdate = true
+            self.transcribedText = combined
+            self.isProgrammaticTextUpdate = false
             if didRemove {
                 self.didRecentlyRemoveWord = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                    self.didRecentlyRemoveWord = false
+                    self?.didRecentlyRemoveWord = false
                 }
             }
             // Reset silence timer on new spoken text
@@ -132,6 +181,9 @@ public final class AppState: ObservableObject, @unchecked Sendable {
                 self.recordTranscript(text)
             }
         }
+        
+        // Initialize wake word recognizer locale to match user preference
+        WakeWordDetector.shared.setLocale(selectedLocale)
         
         // Bind Wake Word trigger
         WakeWordDetector.shared.onWakeWordDetected = { [weak self] in
@@ -150,16 +202,18 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     // MARK: - Actions
     
     public func toggleRecording() {
-        if status == .recording {
+        if status == .recording || isListeningPaused {
             stopRecordingAndDeliver()
         } else {
             isTriggeredByWakeWord = false
+            isListeningPaused = false
             startRecording()
         }
     }
     
     public func startRecording() {
         guard status != .recording else { return }
+        isListeningPaused = false
         
         // 1. Verify Microphone Access via modern AVAudioApplication API
         let micPerm = AVAudioApplication.shared.recordPermission
@@ -202,18 +256,31 @@ public final class AppState: ObservableObject, @unchecked Sendable {
         
         // Capture frontmost application prior to presenting HUD
         PasteService.shared.recordCurrentFrontmostApp()
+        let targetApp = PasteService.shared.previousFrontmostApp
+        self.detectedAppContextTitle = ContextIntelligence.contextDisplayTitle(for: targetApp)
+        
+        if isAppAwareContextEnabled {
+            let suggestedTag = ContextIntelligence.suggestedTag(for: targetApp)
+            self.selectedAITag = suggestedTag
+            print("🎯 [AppState] App-Aware Context: frontmost app is '\(detectedAppContextTitle ?? "Unknown")', auto-selected tag: \(suggestedTag.displayName)")
+        }
         
         // Stop wake word detector while dictating
         WakeWordDetector.shared.stopListening()
         
+        baseCommittedText = ""
+        isProgrammaticTextUpdate = true
         transcribedText = ""
+        isProgrammaticTextUpdate = false
         status = .recording
         SoundManager.shared.playStartCue()
         
         do {
             SpeechRecognitionService.shared.setLocale(selectedLocale)
             try SpeechRecognitionService.shared.startSession()
-            try AudioEngineManager.shared.start()
+            if !AudioEngineManager.shared.isRunning {
+                try AudioEngineManager.shared.start()
+            }
             resetSilenceTimer()
         } catch {
             print("❌ [AppState] Failed to start dictation: \(error)")
@@ -224,16 +291,23 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     }
     
     public func stopRecordingAndDeliver() {
-        guard status == .recording else { return }
+        guard status == .recording || isListeningPaused else { return }
+        isListeningPaused = false
         status = .finishing
         silenceTimer?.invalidate()
         silenceTimer = nil
         
         SoundManager.shared.playStopCue()
         SpeechRecognitionService.shared.finishSession()
-        AudioEngineManager.shared.stop()
+        
+        // If wake word is NOT enabled, stop the audio engine to save battery.
+        // If wake word IS enabled, keep the audio engine running for seamless wake-word listening!
+        if !isWakeWordEnabled {
+            AudioEngineManager.shared.stop()
+        }
         
         let textToDeliver = transcribedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        baseCommittedText = ""
         
         if !textToDeliver.isEmpty {
             recordTranscript(textToDeliver)
@@ -255,27 +329,175 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     }
     
     public func cancelRecording() {
-        guard status == .recording else { return }
+        guard status == .recording || isListeningPaused else { return }
         silenceTimer?.invalidate()
         silenceTimer = nil
+        isListeningPaused = false
         
         SpeechRecognitionService.shared.cancelSession()
-        AudioEngineManager.shared.stop()
+        if !isWakeWordEnabled {
+            AudioEngineManager.shared.stop()
+        }
+        baseCommittedText = ""
         transcribedText = ""
         status = .idle
         restartWakeWordIfNeeded()
     }
     
-    /// Completely stops all recording, wake word detection, and audio engine processing.
-    public func stopListeningCompletely() {
+    /// Clears the active transcribed text and resets the speech recognizer acoustic buffer,
+    /// guaranteeing that previously spoken words will never repeat when new speech begins.
+    public func clearTranscribedText() {
+        baseCommittedText = ""
+        transcribedText = ""
+        prePolishText = nil
         silenceTimer?.invalidate()
         silenceTimer = nil
         
-        SpeechRecognitionService.shared.cancelSession()
+        if status == .recording {
+            SpeechRecognitionService.shared.resetSessionForFreshInput()
+            print("🧹 [AppState] Transcribed text cleared by user. Recognition session reset for fresh speech.")
+        }
+    }
+    
+    /// Handles manual editing inside the text box by the user, updating base committed text
+    /// and restarting the recognition session so new speech appends cleanly without resurrecting deleted words.
+    public func handleUserManualTextEdit(_ newText: String) {
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcribedText = newText
+        prePolishText = nil
+        
+        if trimmed.isEmpty {
+            clearTranscribedText()
+        } else {
+            baseCommittedText = newText
+            if status == .recording {
+                SpeechRecognitionService.shared.resetSessionForFreshInput()
+                print("✏️ [AppState] User manually edited text. Committed base text and restarted recognizer for subsequent speech.")
+            }
+        }
+    }
+    
+    /// Instantly re-pastes the most recent transcription into the current external app (Option + Shift + V).
+    public func rePasteLastTranscription() {
+        guard let last = recentTranscriptions.first, !last.isEmpty else {
+            print("⚠️ [AppState] Re-paste requested but recent transcripts history is empty.")
+            SoundManager.shared.playErrorCue()
+            return
+        }
+        print("📋 [AppState] Re-pasting last transcription (\(last.count) chars): \"\(last)\"")
+        SoundManager.shared.playPasteCue()
+        PasteService.shared.pasteDirectly(text: last)
+    }
+    
+    /// Pauses listening without hiding the HUD popup card.
+    /// Audio engine, microphone capture, and wake word are immediately terminated.
+    public func pauseListening() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        
+        SpeechRecognitionService.shared.finishSession()
         WakeWordDetector.shared.stopListening()
         AudioEngineManager.shared.stop()
-        status = .idle
-        print("⏹️ [AppState] Stopped all listening and audio engine completely.")
+        
+        isListeningPaused = true
+        audioLevel = 0.0
+        print("⏸️ [AppState] Listening paused. HUD remains open for user review.")
+    }
+    
+    /// Resumes active speech recording from paused state without wiping existing text.
+    public func resumeListening() {
+        guard isListeningPaused else { return }
+        isListeningPaused = false
+        
+        // Verify permissions
+        guard isMicAuthorized && isSpeechAuthorized else {
+            refreshPermissions()
+            return
+        }
+        
+        status = .recording
+        SoundManager.shared.playStartCue()
+        
+        do {
+            SpeechRecognitionService.shared.setLocale(selectedLocale)
+            try SpeechRecognitionService.shared.startSession()
+            if !AudioEngineManager.shared.isRunning {
+                try AudioEngineManager.shared.start()
+            }
+            resetSilenceTimer()
+            print("▶️ [AppState] Resumed speech listening.")
+        } catch {
+            print("❌ [AppState] Failed to resume speech listening: \(error)")
+            SoundManager.shared.playErrorCue()
+            isListeningPaused = true
+        }
+    }
+    
+    /// Completely stops all recording, wake word detection, and audio engine processing.
+    public func stopListeningCompletely() {
+        pauseListening()
+    }
+    
+    // MARK: - AI Enhancement & Polish
+    
+    public func reloadAIConfiguration() {
+        if let config = EnvLoader.loadAIConfiguration() {
+            self.aiConfiguration = config
+            self.isAIAvailable = true
+            print("🤖 [AppState] Local AI Llama 3 loaded: \(config.model) (\(config.apiUrl))")
+        } else {
+            self.isAIAvailable = false
+            print("ℹ️ [AppState] No AI API key detected in .env.")
+        }
+    }
+    
+    public func polishCurrentText() {
+        guard let config = aiConfiguration else {
+            aiErrorMessage = "AI configuration missing. Check .env file."
+            return
+        }
+        let text = transcribedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        
+        isPolishing = true
+        aiErrorMessage = nil
+        prePolishText = transcribedText
+        
+        Task {
+            do {
+                let polished = try await AIPolishService.shared.polish(
+                    text: text,
+                    tag: selectedAITag,
+                    config: config
+                )
+                await MainActor.run {
+                    self.isProgrammaticTextUpdate = true
+                    self.transcribedText = polished
+                    self.isProgrammaticTextUpdate = false
+                    self.isPolishing = false
+                    SoundManager.shared.playStartCue()
+                    print("✨ [AppState] Successfully polished text with tag: \(self.selectedAITag.displayName)")
+                }
+            } catch {
+                await MainActor.run {
+                    self.isPolishing = false
+                    self.aiErrorMessage = error.localizedDescription
+                    SoundManager.shared.playErrorCue()
+                    print("⚠️ [AppState] AI polish failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    public func undoPolish() {
+        if let original = prePolishText {
+            isProgrammaticTextUpdate = true
+            transcribedText = original
+            isProgrammaticTextUpdate = false
+            prePolishText = nil
+            SoundManager.shared.playWordRemovedCue()
+            print("↺ [AppState] Reverted polish to original transcription.")
+        }
     }
     
     /// Purges all transcribed text, recent history, and in-memory temporary audio buffers.
@@ -283,7 +505,9 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     public func purgeAllSessionData() {
         silenceTimer?.invalidate()
         silenceTimer = nil
+        isProgrammaticTextUpdate = true
         transcribedText = ""
+        isProgrammaticTextUpdate = false
         recentTranscriptions.removeAll()
         AudioEngineManager.shared.purgeTemporaryAudioMemory()
         print("🧹 [AppState] All session data and temporary audio memory purged.")
@@ -293,6 +517,7 @@ public final class AppState: ObservableObject, @unchecked Sendable {
         self.selectedLocale = locale
         UserDefaults.standard.set(locale.identifier, forKey: "HardyFlow_Locale")
         SpeechRecognitionService.shared.setLocale(locale)
+        WakeWordDetector.shared.setLocale(locale)
     }
     
     private func handleWakeWordSettingChanged() {
@@ -318,11 +543,13 @@ public final class AppState: ObservableObject, @unchecked Sendable {
         
         status = .listeningWakeWord
         WakeWordDetector.shared.startListening()
-        do {
-            try AudioEngineManager.shared.start()
-        } catch {
-            print("⚠️ [AppState] Failed to start audio engine for wake word: \(error)")
-            status = .idle
+        if !AudioEngineManager.shared.isRunning {
+            do {
+                try AudioEngineManager.shared.start()
+            } catch {
+                print("⚠️ [AppState] Failed to start audio engine for wake word: \(error)")
+                status = .idle
+            }
         }
     }
     
@@ -401,6 +628,8 @@ public final class AppState: ObservableObject, @unchecked Sendable {
         let ax = PasteService.isAccessibilityTrusted
         
         DispatchQueue.main.async {
+            let previousCanListen = self.isMicAuthorized && self.isSpeechAuthorized
+            
             if self.isMicAuthorized != mic {
                 self.isMicAuthorized = mic
                 print("🎙️ [AppState] Mic permission updated: \(mic)")
@@ -412,6 +641,12 @@ public final class AppState: ObservableObject, @unchecked Sendable {
             if self.isAccessibilityAuthorized != ax {
                 self.isAccessibilityAuthorized = ax
                 print("♿ [AppState] Accessibility permission updated: \(ax)")
+            }
+            
+            let nowCanListen = mic && speech
+            if !previousCanListen && nowCanListen && self.isWakeWordEnabled && self.status == .idle {
+                print("🎙️ [AppState] Permissions confirmed. Starting wake word ambient listening.")
+                self.startWakeWordListening()
             }
         }
     }

@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreAudio
 import AudioToolbox
+import HardyFlowObjC
 
 /// Model describing an available audio input device.
 public struct AudioInputDevice: Identifiable, Sendable, Hashable {
@@ -22,13 +23,22 @@ public struct AudioInputDevice: Identifiable, Sendable, Hashable {
 public final class AudioEngineManager: @unchecked Sendable {
     public static let shared = AudioEngineManager()
     
-    private var audioEngine = AVAudioEngine()
+    private let audioEngine = AVAudioEngine()
     private let engineQueue = DispatchQueue(label: "com.hardyflow.audioengine", qos: .userInteractive)
     private static let queueKey = DispatchSpecificKey<Void>()
     private var configChangeWorkItem: DispatchWorkItem?
+    private var isTapInstalled: Bool = false
     
     public private(set) var isRunning: Bool = false
     public var selectedDeviceID: AudioDeviceID?
+    
+    /// Whisper Mode: Digital pre-gain boost for quiet whispered speech (Phase 4).
+    public var isWhisperModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isWhisperModeEnabled, forKey: "HardyFlow_WhisperModeEnabled")
+        }
+    }
+    public var whisperGainMultiplier: Float = 2.8
     
     /// Handler invoked for each incoming PCM audio buffer.
     public var onAudioBuffer: ((AVAudioPCMBuffer) -> Void)?
@@ -37,6 +47,7 @@ public final class AudioEngineManager: @unchecked Sendable {
     public var onAudioLevelChanged: ((Float) -> Void)?
     
     private init() {
+        self.isWhisperModeEnabled = UserDefaults.standard.bool(forKey: "HardyFlow_WhisperModeEnabled")
         engineQueue.setSpecific(key: Self.queueKey, value: ())
         setupAudioSessionNotifications()
     }
@@ -199,8 +210,27 @@ public final class AudioEngineManager: @unchecked Sendable {
     private func stopInternal() {
         configChangeWorkItem?.cancel()
         guard isRunning else { return }
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        
+        if isTapInstalled {
+            var tapError: NSError?
+            HardyFlowTryCatch({
+                self.audioEngine.inputNode.removeTap(onBus: 0)
+            }, &tapError)
+            isTapInstalled = false
+            if let tapError = tapError {
+                print("⚠️ [AudioEngineManager] Safe tap removal notice: \(tapError.localizedDescription)")
+            }
+        }
+        
+        var stopError: NSError?
+        HardyFlowTryCatch({
+            self.audioEngine.stop()
+            self.audioEngine.reset()
+        }, &stopError)
+        if let stopError = stopError {
+            print("⚠️ [AudioEngineManager] Safe engine stop notice: \(stopError.localizedDescription)")
+        }
+        
         isRunning = false
         DispatchQueue.main.async { [weak self] in
             self?.onAudioLevelChanged?(0.0)
@@ -209,11 +239,10 @@ public final class AudioEngineManager: @unchecked Sendable {
     }
     
     private func startInternal() throws {
-        if isRunning {
+        if isRunning && audioEngine.isRunning && isTapInstalled {
             return
         }
         
-        audioEngine = AVAudioEngine()
         let inputNode = audioEngine.inputNode
         
         // Determine best audio input device
@@ -223,8 +252,7 @@ public final class AudioEngineManager: @unchecked Sendable {
         if let selectedID = selectedDeviceID, let found = availableDevices.first(where: { $0.id == selectedID }) {
             targetDevice = found
         } else if let builtIn = availableDevices.first(where: { $0.isBuiltIn }) {
-            // If AirPods / Bluetooth headphones are connected, default input switches to Bluetooth SCO (telephone quality).
-            // Selecting the Built-in Microphone gives pristine 48kHz studio audio without Bluetooth codec degradation!
+            // Built-in Microphone gives pristine 48kHz audio without Bluetooth codec degradation
             targetDevice = builtIn
         }
         
@@ -233,29 +261,86 @@ public final class AudioEngineManager: @unchecked Sendable {
             print("🎙️ [AudioEngineManager] Configured input device: '\(target.name)' (ID: \(target.id), Built-in: \(target.isBuiltIn))")
         }
         
-        // Remove any existing tap on bus 0 before installing
-        inputNode.removeTap(onBus: 0)
+        // Safely remove any existing tap on bus 0 before installing
+        var removeError: NSError?
+        HardyFlowTryCatch({
+            inputNode.removeTap(onBus: 0)
+        }, &removeError)
+        isTapInstalled = false
         
         // Inspect native hardware output format on bus 0
         let nativeFormat = inputNode.outputFormat(forBus: 0)
-        let formatToUse: AVAudioFormat? = (nativeFormat.sampleRate > 0 && nativeFormat.channelCount > 0) ? nativeFormat : nil
-        
-        let bufferSize: AVAudioFrameCount = 1024
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: formatToUse) { [weak self] (buffer, _) in
-            guard let self = self else { return }
-            
-            // Forward buffer to recognition consumers
-            self.onAudioBuffer?(buffer)
-            
-            // Calculate normalized RMS audio level for waveform visualizer
-            let level = self.calculateRMSLevel(from: buffer)
-            DispatchQueue.main.async {
-                self.onAudioLevelChanged?(level)
-            }
+        guard nativeFormat.sampleRate > 0 && nativeFormat.channelCount > 0 else {
+            print("⚠️ [AudioEngineManager] Microphone hardware not ready (sample rate: \(nativeFormat.sampleRate)Hz, channels: \(nativeFormat.channelCount)).")
+            throw NSError(
+                domain: "HardyFlowAudioError",
+                code: 1002,
+                userInfo: [NSLocalizedDescriptionKey: "Microphone hardware not ready. Please verify audio input permissions."]
+            )
         }
         
-        audioEngine.prepare()
-        try audioEngine.start()
+        let formatToUse: AVAudioFormat? = nativeFormat
+        let bufferSize: AVAudioFrameCount = 1024
+        
+        var installError: NSError?
+        let tapSuccess = HardyFlowTryCatch({
+            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: formatToUse) { [weak self] (buffer, _) in
+                guard let self = self else { return }
+                
+                // Whisper Mode: Apply digital soft-limiting pre-gain boost to quiet whispered audio
+                if self.isWhisperModeEnabled, let channelData = buffer.floatChannelData {
+                    let frameCount = Int(buffer.frameLength)
+                    let channelCount = Int(buffer.format.channelCount)
+                    let gain = self.whisperGainMultiplier
+                    for ch in 0..<channelCount {
+                        let ptr = channelData[ch]
+                        for i in 0..<frameCount {
+                            let boosted = ptr[i] * gain
+                            ptr[i] = tanhf(boosted)
+                        }
+                    }
+                }
+                
+                // Forward buffer to recognition consumers
+                self.onAudioBuffer?(buffer)
+                
+                // Calculate normalized RMS audio level for waveform visualizer
+                let level = self.calculateRMSLevel(from: buffer)
+                DispatchQueue.main.async {
+                    self.onAudioLevelChanged?(level)
+                }
+            }
+        }, &installError)
+        
+        guard tapSuccess else {
+            isTapInstalled = false
+            let desc = installError?.localizedDescription ?? "Failed to install audio tap on input node."
+            print("❌ [AudioEngineManager] Caught tap installation exception safely: \(desc)")
+            throw NSError(domain: "HardyFlowAudioError", code: 1003, userInfo: [NSLocalizedDescriptionKey: desc])
+        }
+        
+        isTapInstalled = true
+        
+        var prepareError: NSError?
+        HardyFlowTryCatch({
+            self.audioEngine.prepare()
+        }, &prepareError)
+        
+        var startError: NSError?
+        let startSuccess = HardyFlowTryCatch({
+            do {
+                try self.audioEngine.start()
+            } catch {
+                print("❌ [AudioEngineManager] AVAudioEngine.start() error: \(error.localizedDescription)")
+            }
+        }, &startError)
+        
+        guard startSuccess && audioEngine.isRunning else {
+            let desc = startError?.localizedDescription ?? "Failed to start AVAudioEngine."
+            print("❌ [AudioEngineManager] Failed to start engine safely: \(desc)")
+            throw NSError(domain: "HardyFlowAudioError", code: 1004, userInfo: [NSLocalizedDescriptionKey: desc])
+        }
+        
         isRunning = true
         print("🎙️ [AudioEngineManager] Audio engine started successfully (Hardware format: \(nativeFormat.sampleRate)Hz, \(nativeFormat.channelCount) ch).")
     }

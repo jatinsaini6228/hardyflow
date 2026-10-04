@@ -54,8 +54,9 @@ public struct PreferencesView: View {
             Picker("", selection: $state.selectedPreferencesTab) {
                 Text("General").tag(0)
                 Text("Voice & Wake").tag(1)
-                Text("Output").tag(2)
-                Text("Permissions").tag(3)
+                Text("Snippets").tag(2)
+                Text("Output").tag(3)
+                Text("Permissions").tag(4)
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
@@ -70,8 +71,10 @@ public struct PreferencesView: View {
                     case 1:
                         voiceSettingsTab
                     case 2:
-                        outputSettingsTab
+                        snippetsSettingsTab
                     case 3:
+                        outputSettingsTab
+                    case 4:
                         permissionsTab
                     default:
                         EmptyView()
@@ -79,7 +82,7 @@ public struct PreferencesView: View {
                 }
                 .padding()
             }
-            .frame(height: 320)
+            .frame(height: 330)
             
             Divider()
             
@@ -140,24 +143,55 @@ public struct PreferencesView: View {
                 .padding(8)
             }
             
-            GroupBox(label: Label("Global Activation Shortcut", systemImage: "keyboard")) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Default Dictation Hotkey:")
-                            .font(.system(size: 12, weight: .medium))
-                        Text("Press to toggle speech-to-text from inside any background app.")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+            GroupBox(label: Label("App-Aware Context Intelligence", systemImage: "sparkles.square.filled.on.square")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Automatically adapt AI Polish tags to active window", isOn: $state.isAppAwareContextEnabled)
+                        .font(.system(size: 13, weight: .medium))
+                    
+                    Text("Detects when you are in Mail/Outlook (auto-selects Email tag), VS Code/Cursor/Terminal (auto-selects AI-Prompt tag), or Slack/Discord (casual voice).")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+            }
+            
+            GroupBox(label: Label("Global Activation Shortcuts", systemImage: "keyboard")) {
+                VStack(spacing: 8) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Dictation (Tap or Push-to-Talk):")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("Tap to toggle, or hold while speaking to auto-paste on release.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Text("⌥ Space")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.secondary.opacity(0.15))
+                            .cornerRadius(6)
                     }
                     
-                    Spacer()
+                    Divider()
                     
-                    Text("⌥ Space")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.15))
-                        .cornerRadius(6)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Re-Paste Last Dictation:")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("Instantly paste your previous speech into another window.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Text("⌥ ⇧ V")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.secondary.opacity(0.15))
+                            .cornerRadius(6)
+                    }
                 }
                 .padding(8)
             }
@@ -193,6 +227,18 @@ public struct PreferencesView: View {
                     
                     Text("💡 HardyFlow automatically routes input to the MacBook built-in studio microphone to avoid low-bitrate Bluetooth telephony (SCO) compression when AirPods are connected.")
                         .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+            }
+            
+            GroupBox(label: Label("Whisper Mode (Digital Pre-Gain Boost)", systemImage: "ear.and.waveform")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Enable digital pre-gain boost (+9dB) for soft speech", isOn: $state.isWhisperModeEnabled)
+                        .font(.system(size: 13, weight: .medium))
+                    
+                    Text("Amplifies quiet whispers with soft hyperbolic tangent limiting so you can dictate quietly late at night or in shared spaces without raising your voice.")
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
                 .padding(8)
@@ -234,6 +280,75 @@ public struct PreferencesView: View {
                     Text("Saying 'No No No' (or 'No No No Remove') while speaking will instantly excise the command and erase the preceding word from your dictation buffer. Saying it multiple times removes multiple words.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
+                }
+                .padding(8)
+            }
+        }
+    }
+    
+    // MARK: - Snippets Tab
+    private var snippetsSettingsTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GroupBox(label: Label("Voice Macros & Text Expansion", systemImage: "text.quote")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Configure personal voice shortcuts. Saying these triggers automatically expands them into full text:")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("My Email (Say: 'my email' or 'insert my email'):")
+                            .font(.system(size: 11, weight: .medium))
+                        TextField("e.g. name@example.com", text: Binding(
+                            get: { SnippetManager.userEmail },
+                            set: { SnippetManager.userEmail = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("My Phone (Say: 'my phone'):")
+                            .font(.system(size: 11, weight: .medium))
+                        TextField("e.g. +91 98765 43210", text: Binding(
+                            get: { SnippetManager.userPhone },
+                            set: { SnippetManager.userPhone = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("My Meeting Link (Say: 'my meeting' or 'my meet'):")
+                            .font(.system(size: 11, weight: .medium))
+                        TextField("e.g. https://meet.google.com/abc-defg-hij", text: Binding(
+                            get: { SnippetManager.userMeeting },
+                            set: { SnippetManager.userMeeting = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                    }
+                }
+                .padding(8)
+            }
+            
+            GroupBox(label: Label("Built-in Developer Templates", systemImage: "chevron.left.forwardslash.chevron.right")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Say: \"bug template\"")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundColor(.purple)
+                        Spacer()
+                        Text("Inserts structured bug report")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    Divider()
+                    HStack {
+                        Text("Say: \"pr template\"")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundColor(.purple)
+                        Spacer()
+                        Text("Inserts PR summary & test plan")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .padding(8)
             }

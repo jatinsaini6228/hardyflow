@@ -1,6 +1,7 @@
 import Foundation
 import Speech
 import AVFoundation
+import HardyFlowObjC
 
 /// Manages native Apple Speech Recognition, multi-locale accent tuning (Indian English, Hindi, US, etc.),
 /// real-time streaming partial results, and inline voice command mistake correction.
@@ -96,90 +97,120 @@ public final class SpeechRecognitionService: @unchecked Sendable {
     }
     
     /// Starts a streaming recognition session.
+    /// Starts a streaming recognition session.
     public func startSession() throws {
         try performOnQueue {
             if isRecognizing {
-                cancelSession()
+                cancelSessionInternal()
             }
-            
-            guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-                throw NSError(
-                    domain: "HardyFlowSpeechError",
-                    code: 2001,
-                    userInfo: [NSLocalizedDescriptionKey: "Speech recognizer is not available for locale \(currentLocale.identifier)."]
-                )
-            }
-            
-            lastSpokenText = ""
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            request.taskHint = .dictation
-            request.addsPunctuation = true
-            
-            // Allow Apple's cloud neural models for maximum accuracy when connected, falling back to on-device
-            if #available(macOS 13.0, *) {
-                request.requiresOnDeviceRecognition = false
-            }
-            
-            // Prime acoustic model with comprehensive vocabulary so words like "popup" are never mistaken for "papa"
-            request.contextualStrings = [
-                "popup", "pop-up", "pop up", "card", "modal", "window",
-                "HardyFlow", "Hardy", "Hey Hardy", "Wisperflow", "paste", "copy", "remove", "undo", "move",
-                "drag", "drop", "resize", "editable", "text", "India",
-                "Indian", "Hindi", "English", "shortcut", "menu", "voice",
-                "speech", "dictation", "command", "button",
-                "Notes", "Chrome", "Slack", "VS Code", "Terminal"
-            ]
-            
-            self.recognitionRequest = request
-            
-            self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] (result, error) in
-                guard let self = self else { return }
-                
-                if let result = result {
-                    let rawText = result.bestTranscription.formattedString
-                    let processed = self.commandProcessor.process(rawText)
-                    
-                    if processed.didRemove {
-                        SoundManager.shared.playWordRemovedCue()
-                    }
-                    
-                    self.lastSpokenText = processed.text
-                    
-                    DispatchQueue.main.async {
-                        self.onTranscriptionUpdate?(processed.text, processed.didRemove)
-                    }
-                    
-                    if result.isFinal {
-                        DispatchQueue.main.async {
-                            self.onFinalTranscription?(processed.text)
-                        }
-                    }
-                }
-                
-                if let error = error {
-                    // Ignore normal cancellation errors (code 216 / 203)
-                    let nsError = error as NSError
-                    if nsError.domain == "kAFAssistantErrorDomain" && (nsError.code == 216 || nsError.code == 203) {
-                        return
-                    }
-                    print("⚠️ [SpeechRecognitionService] Task error: \(error.localizedDescription)")
-                    DispatchQueue.main.async {
-                        self.onError?(error)
-                    }
-                }
-            }
-            
-            isRecognizing = true
-            print("🚀 [SpeechRecognitionService] Recognition session started for \(currentLocale.identifier).")
+            try startSessionInternal()
         }
+    }
+    
+    /// Resets the active speech recognizer session so subsequent speech starts from an empty buffer.
+    /// Does not halt the microphone engine; subsequent audio buffers stream into a fresh request with zero old words.
+    public func resetSessionForFreshInput() {
+        performOnQueue {
+            guard isRecognizing else { return }
+            cancelSessionInternal()
+            do {
+                try startSessionInternal()
+                print("🔄 [SpeechRecognitionService] Speech recognition session restarted with clean acoustic buffer.")
+            } catch {
+                print("⚠️ [SpeechRecognitionService] Failed to restart fresh recognition session: \(error)")
+            }
+        }
+    }
+    
+    private func startSessionInternal() throws {
+        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
+            throw NSError(
+                domain: "HardyFlowSpeechError",
+                code: 2001,
+                userInfo: [NSLocalizedDescriptionKey: "Speech recognizer is not available for locale \(currentLocale.identifier)."]
+            )
+        }
+        
+        lastSpokenText = ""
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        request.addsPunctuation = true
+        
+        // Allow Apple's cloud neural models for maximum accuracy when connected, falling back to on-device
+        if #available(macOS 13.0, *) {
+            request.requiresOnDeviceRecognition = false
+        }
+        
+        // Prime acoustic model with comprehensive tech and Indian vocabulary
+        request.contextualStrings = CustomVocabulary.allContextualStrings
+        
+        self.recognitionRequest = request
+        
+        self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] (result, error) in
+            guard let self = self else { return }
+            
+            if let result = result {
+                let rawText = result.bestTranscription.formattedString
+                let processed = self.commandProcessor.process(rawText)
+                
+                if processed.didRemove {
+                    SoundManager.shared.playWordRemovedCue()
+                }
+                
+                self.lastSpokenText = processed.text
+                
+                DispatchQueue.main.async {
+                    self.onTranscriptionUpdate?(processed.text, processed.didRemove)
+                }
+                
+                if result.isFinal {
+                    DispatchQueue.main.async {
+                        self.onFinalTranscription?(processed.text)
+                    }
+                }
+            }
+            
+            if let error = error {
+                // Ignore normal cancellation errors (code 216 / 203)
+                let nsError = error as NSError
+                if nsError.domain == "kAFAssistantErrorDomain" && (nsError.code == 216 || nsError.code == 203) {
+                    return
+                }
+                print("⚠️ [SpeechRecognitionService] Task error: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.onError?(error)
+                }
+            }
+        }
+        
+        isRecognizing = true
+        print("🚀 [SpeechRecognitionService] Recognition session started for \(currentLocale.identifier).")
+    }
+    
+    private func cancelSessionInternal() {
+        isRecognizing = false
+        var error: NSError?
+        HardyFlowTryCatch({
+            self.recognitionTask?.cancel()
+            self.recognitionRequest?.endAudio()
+        }, &error)
+        self.recognitionTask = nil
+        self.recognitionRequest = nil
+        self.lastSpokenText = ""
     }
     
     /// Feeds an incoming PCM buffer into the active recognition request.
     public func appendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         recognitionQueue.async { [weak self] in
-            guard let self = self, self.isRecognizing else { return }
-            self.recognitionRequest?.append(buffer)
+            guard let self = self, self.isRecognizing, let request = self.recognitionRequest else { return }
+            var error: NSError?
+            HardyFlowTryCatch({
+                request.append(buffer)
+            }, &error)
+            if let error = error {
+                print("⚠️ [SpeechRecognitionService] Buffer append notice: \(error.localizedDescription)")
+            }
         }
     }
     
@@ -187,8 +218,11 @@ public final class SpeechRecognitionService: @unchecked Sendable {
     public func finishSession() {
         performOnQueue {
             guard isRecognizing else { return }
-            recognitionRequest?.endAudio()
             isRecognizing = false
+            var error: NSError?
+            HardyFlowTryCatch({
+                self.recognitionRequest?.endAudio()
+            }, &error)
             print("🏁 [SpeechRecognitionService] Recognition session ended audio.")
         }
     }
@@ -196,10 +230,7 @@ public final class SpeechRecognitionService: @unchecked Sendable {
     /// Immediately cancels the recognition task.
     public func cancelSession() {
         performOnQueue {
-            recognitionTask?.cancel()
-            recognitionTask = nil
-            recognitionRequest = nil
-            isRecognizing = false
+            cancelSessionInternal()
             print("🛑 [SpeechRecognitionService] Recognition session cancelled.")
         }
     }

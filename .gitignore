@@ -18,3 +18,8 @@ DerivedData/
 *.tmp
 *.swp
 *~
+
+# Environment Secrets
+.env
+.env.local
+.env.*.local

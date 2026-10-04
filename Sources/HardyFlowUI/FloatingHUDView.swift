@@ -10,7 +10,7 @@ public struct FloatingHUDView: View {
     public init() {}
     
     public var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 14) {
             // Header: Drag Handle Bar, Status Indicator, Language Quick Switch, and Controls
             HStack(spacing: 8) {
                 // Window Move Drag Handle with Grip Icon
@@ -134,17 +134,66 @@ public struct FloatingHUDView: View {
                 .transition(.scale.combined(with: .opacity))
             }
             
-            // Middle 1: Centered Listening Line (Waveform) & Stop Listening Control
-            HStack(spacing: 16) {
+            // Middle 1: Centered Listening Line (Waveform), Whisper Mode Toggle & Stop Listening Control
+            HStack(spacing: 12) {
                 Spacer()
+                
+                // Whisper Mode Toggle Button (Phase 4)
+                Button(action: {
+                    state.isWhisperModeEnabled.toggle()
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: state.isWhisperModeEnabled ? "ear.and.waveform" : "ear")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(state.isWhisperModeEnabled ? "Whisper ON" : "Whisper")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                    }
+                    .foregroundColor(state.isWhisperModeEnabled ? Color.white : Color.white.opacity(0.6))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        state.isWhisperModeEnabled
+                            ? Color.purple.opacity(0.8)
+                            : Color.white.opacity(0.08)
+                    )
+                    .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+                .help("Whisper Mode: Boosts quiet speech for night-time or quiet room dictation")
                 
                 // Centered dynamic soundwave
                 AudioWaveformView(audioLevel: state.audioLevel, barCount: 15)
                 
-                // Stop Listening Button (only shown when listening/recording)
-                if state.status == .recording || state.status == .listeningWakeWord {
+                // Stop Listening / Listen Again Control
+                if state.isListeningPaused {
                     Button(action: {
-                        state.stopListeningCompletely()
+                        state.resumeListening()
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Listen Again")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(
+                            LinearGradient(
+                                colors: [Color.green.opacity(0.85), Color.teal.opacity(0.85)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .cornerRadius(12)
+                        .shadow(color: Color.green.opacity(0.35), radius: 4, x: 0, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Resume listening to microphone dictation")
+                    .transition(.scale.combined(with: .opacity))
+                } else if state.status == .recording || state.status == .listeningWakeWord {
+                    Button(action: {
+                        state.pauseListening()
                     }) {
                         HStack(spacing: 5) {
                             Image(systemName: "stop.fill")
@@ -166,13 +215,156 @@ public struct FloatingHUDView: View {
                         .shadow(color: Color.red.opacity(0.35), radius: 4, x: 0, y: 2)
                     }
                     .buttonStyle(.plain)
-                    .help("Stop listening and turn off microphone immediately")
+                    .help("Pause listening without closing popup")
                     .transition(.scale.combined(with: .opacity))
                 }
                 
                 Spacer()
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
+            
+            // Middle 2: AI Enhancement, Per-App Context & Tag Selection Bar (Visible when AI configured via .env)
+            if state.isAIAvailable {
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        ForEach(PolishTag.allCases) { tag in
+                            let isSelected = state.selectedAITag == tag
+                            Button(action: {
+                                state.selectedAITag = tag
+                            }) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: tag.iconName)
+                                        .font(.system(size: 9))
+                                    Text(tag.displayName)
+                                        .font(.system(size: 10, weight: isSelected ? .bold : .medium, design: .rounded))
+                                }
+                                .foregroundColor(isSelected ? .white : .white.opacity(0.65))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3.5)
+                                .background(
+                                    isSelected
+                                        ? Color.purple.opacity(0.7)
+                                        : Color.white.opacity(0.08)
+                                )
+                                .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    
+                    // App-Aware Context Badge (Phase 2)
+                    if let appContext = state.detectedAppContextTitle, !appContext.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "app.connected.to.app.below.fill")
+                                .font(.system(size: 8))
+                            Text(appContext)
+                                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(.white.opacity(0.65))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(5)
+                        .help("Auto-detected target application: \(appContext)")
+                    }
+                    
+                    Spacer()
+                    
+                    if state.prePolishText != nil {
+                        Button(action: {
+                            state.undoPolish()
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text("Undo")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(.white.opacity(0.8))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3.5)
+                            .background(Color.white.opacity(0.12))
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Revert to original unpolished speech")
+                    }
+                    
+                    Button(action: {
+                        state.polishCurrentText()
+                    }) {
+                        HStack(spacing: 4) {
+                            if state.isPolishing {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(width: 10, height: 10)
+                                Text("Polishing...")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            } else {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("Polish")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            }
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3.5)
+                        .background(
+                            LinearGradient(
+                                colors: [Color.purple, Color.indigo],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .cornerRadius(6)
+                        .shadow(color: Color.purple.opacity(0.4), radius: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(state.isPolishing || state.transcribedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("Polish sentence with Llama 3 AI based on selected tag")
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                
+                if let errorMsg = state.aiErrorMessage {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.pink)
+                            .padding(.top, 1)
+                        
+                        Text(errorMsg)
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .foregroundColor(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                        
+                        Spacer()
+                        
+                        Button(action: {
+                            withAnimation {
+                                state.aiErrorMessage = nil
+                            }
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.white.opacity(0.6))
+                                .padding(3)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss error message")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.pink.opacity(0.2))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.pink.opacity(0.4), lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+                    .transition(.opacity)
+                }
+            }
             
             // Middle 2: Live Editable Text Box (Down and Full Width)
             VStack(alignment: .leading, spacing: 5) {
@@ -187,11 +379,14 @@ public struct FloatingHUDView: View {
                             .allowsHitTesting(false)
                     }
                     
-                    TextEditor(text: $state.transcribedText)
+                    TextEditor(text: Binding(
+                        get: { state.transcribedText },
+                        set: { state.handleUserManualTextEdit($0) }
+                    ))
                         .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundColor(.white)
                         .scrollContentBackground(.hidden)
-                        .padding(4)
+                        .padding(8)
                         .background(Color.black.opacity(0.28))
                         .cornerRadius(10)
                         .overlay(
@@ -234,7 +429,7 @@ public struct FloatingHUDView: View {
                     DraggableTextChip(text: state.transcribedText)
                     
                     Button(action: {
-                        state.transcribedText = ""
+                        state.clearTranscribedText()
                     }) {
                         Text("Clear")
                             .font(.system(size: 10, weight: .medium))
@@ -243,8 +438,8 @@ public struct FloatingHUDView: View {
                     .buttonStyle(.plain)
                     .help("Clear transcribed text")
                 } else {
-                    Text("Say 'No No No' to undo last word")
-                        .font(.system(size: 10, weight: .regular, design: .rounded))
+                    Text("Say 'No No No' to undo • Hold ⌥ Space to push-to-talk")
+                        .font(.system(size: 9.5, weight: .regular, design: .rounded))
                         .foregroundColor(.white.opacity(0.45))
                 }
                 
@@ -291,7 +486,7 @@ public struct FloatingHUDView: View {
                     .shadow(color: Color.blue.opacity(0.4), radius: 5, x: 0, y: 2)
                 }
                 .buttonStyle(.plain)
-                .help("Finish recording and paste text directly into active application")
+                .help("Finish & paste into active app (⌥ Space). Press ⌥ ⇧ V to re-paste anywhere.")
                 
                 // Native Window Resize Handle (smooth AppKit corner dragging)
                 WindowResizeHandleView()
@@ -305,8 +500,8 @@ public struct FloatingHUDView: View {
                     .help("Drag this corner to smoothly resize the popup card")
             }
         }
-        .padding(14)
-        .frame(minWidth: 420, maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
+        .padding(18)
+        .frame(minWidth: 420, maxWidth: .infinity, minHeight: 220, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -348,6 +543,9 @@ public struct FloatingHUDView: View {
     }
     
     private var statusIndicatorColor: Color {
+        if state.isListeningPaused {
+            return Color.yellow
+        }
         switch state.status {
         case .recording:
             return Color.red
@@ -361,6 +559,9 @@ public struct FloatingHUDView: View {
     }
     
     private var statusTitle: String {
+        if state.isListeningPaused {
+            return "Paused (Mic Off)"
+        }
         switch state.status {
         case .recording:
             return "Listening..."

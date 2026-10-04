@@ -51,6 +51,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             print("⚡ [HardyFlow] Global hotkey pressed (⌥ Space) -> toggling dictation.")
             AppState.shared.toggleRecording()
         }
+        HotkeyManager.shared.onPushToTalkFinished = {
+            print("⚡ [HardyFlow] Push-to-Talk released -> auto-delivering text.")
+            if AppState.shared.status == .recording {
+                AppState.shared.stopRecordingAndDeliver()
+            }
+        }
+        HotkeyManager.shared.onRePastePressed = {
+            print("⚡ [HardyFlow] Re-paste hotkey pressed (⌥ ⇧ V) -> pasting last transcription.")
+            AppState.shared.rePasteLastTranscription()
+        }
     }
     
     private func verifyInitialPermissions() {

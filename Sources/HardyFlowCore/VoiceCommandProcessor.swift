@@ -25,10 +25,12 @@ public struct VoiceCommandProcessor: Sendable {
     
     public init() {}
     
-    /// Processes a raw transcription string, removes any "NO NO NO" trigger sequences,
-    /// and backtracks to remove the preceding word for each detected command.
+    /// Processes a raw transcription string, applies custom phonetic auto-corrections,
+    /// expands spoken macro snippets, removes any "NO NO NO" trigger sequences, and applies smart text normalization.
     public func process(_ rawText: String) -> ProcessResult {
-        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let corrected = CustomVocabulary.applyPhoneticCorrections(rawText)
+        let withSnippets = SnippetManager.expandSnippets(in: corrected)
+        let trimmed = withSnippets.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return ProcessResult(text: "", didRemove: false, wordsRemovedCount: 0)
         }
@@ -38,7 +40,8 @@ public struct VoiceCommandProcessor: Sendable {
         let matches = Self.removalRegex.matches(in: trimmed, options: [], range: fullRange)
         
         guard !matches.isEmpty else {
-            return ProcessResult(text: trimmed, didRemove: false, wordsRemovedCount: 0)
+            let normalized = Self.normalizeText(trimmed)
+            return ProcessResult(text: normalized, didRemove: false, wordsRemovedCount: 0)
         }
         
         // Split text into tokens and scan sequentially
@@ -65,7 +68,8 @@ public struct VoiceCommandProcessor: Sendable {
         }
         
         let cleaned = tokens.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        return ProcessResult(text: cleaned, didRemove: wordsRemoved > 0, wordsRemovedCount: wordsRemoved)
+        let normalized = Self.normalizeText(cleaned)
+        return ProcessResult(text: normalized, didRemove: wordsRemoved > 0, wordsRemovedCount: wordsRemoved)
     }
     
     /// Helper to test if a sequence of tokens starting at index matches "no no no" (or "no no no remove").
@@ -93,5 +97,77 @@ public struct VoiceCommandProcessor: Sendable {
     
     private func cleanToken(_ token: String) -> String {
         return token.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.whitespaces))
+    }
+    
+    // MARK: - Smart Text Normalization
+    
+    /// Normalizes spoken punctuation, fixes orphan punctuation spacing, formats currencies/numbers,
+    /// and ensures proper sentence capitalization.
+    public static func normalizeText(_ input: String) -> String {
+        var text = input
+        guard !text.isEmpty else { return "" }
+        
+        // 1. Spoken Punctuation Normalization
+        let punctuationReplacements: [(pattern: String, template: String)] = [
+            (#"(?i)\b(?:full\s+stop|period)\b"#, "."),
+            (#"(?i)\bquestion\s+mark\b"#, "?"),
+            (#"(?i)\bexclamation\s+(?:mark|point)\b"#, "!"),
+            (#"(?i)\bnew\s+line\b"#, "\n"),
+            (#"(?i)\bnew\s+paragraph\b"#, "\n\n")
+        ]
+        for (pattern, template) in punctuationReplacements {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let range = NSRange(location: 0, length: (text as NSString).length)
+                text = regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+            }
+        }
+        
+        // 2. Currency & Number Normalization
+        let numberReplacements: [(pattern: String, template: String)] = [
+            (#"(?i)\b(\d+)\s+dollars\b"#, "\\$$1"),
+            (#"(?i)\b(\d+)\s+rupees\b"#, "₹$1"),
+            (#"(?i)\b(\d+)\s+lakhs?\b"#, "$1 Lakh"),
+            (#"(?i)\b(\d+)\s+crores?\b"#, "$1 Crore")
+        ]
+        for (pattern, template) in numberReplacements {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let range = NSRange(location: 0, length: (text as NSString).length)
+                text = regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+            }
+        }
+        
+        // 3. Clean orphan spaces before punctuation: "hello , world" -> "hello, world"
+        if let regex = try? NSRegularExpression(pattern: #"\s+([,.\?!:;])"#, options: []) {
+            let range = NSRange(location: 0, length: (text as NSString).length)
+            text = regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "$1")
+        }
+        
+        // 4. Clean orphan punctuation at beginning of text: ", hello" -> "hello"
+        if let regex = try? NSRegularExpression(pattern: #"^[,.\?!:;]+\s*"#, options: []) {
+            let range = NSRange(location: 0, length: (text as NSString).length)
+            text = regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "")
+        }
+        
+        // 5. Capitalize first letter of string
+        text = capitalizeFirstLetter(text)
+        
+        // 6. Capitalize after sentence terminators (. ! ? \n)
+        if let regex = try? NSRegularExpression(pattern: #"([.!?\n]\s+)([a-z])"#, options: []) {
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches.reversed() {
+                let charRange = match.range(at: 2)
+                let charStr = nsText.substring(with: charRange)
+                let upperStr = charStr.uppercased()
+                text = (text as NSString).replacingCharacters(in: charRange, with: upperStr)
+            }
+        }
+        
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    private static func capitalizeFirstLetter(_ text: String) -> String {
+        guard let first = text.first else { return text }
+        return first.uppercased() + text.dropFirst()
     }
 }

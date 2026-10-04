@@ -14,8 +14,14 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "HardyFlowCore",
+            name: "HardyFlowObjC",
             dependencies: [],
+            path: "Sources/HardyFlowObjC",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "HardyFlowCore",
+            dependencies: ["HardyFlowObjC"],
             path: "Sources/HardyFlowCore"
         ),
         .target(
